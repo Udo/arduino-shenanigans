@@ -8,7 +8,6 @@
  * - Web server with routes for GPIO states and Wi-Fi credentials.
  * - mDNS service for easy local network access.
  * - OTA updates for firmware management.
- * - Ping monitoring and HTTP request queuing.
  * - EEPROM storage for Wi-Fi credentials and server URL persistence.
  * 
  * Commands:
@@ -23,7 +22,6 @@
 #include <ESP8266WebServer.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
-#include <ESPping.h>
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
 
@@ -202,18 +200,6 @@ String getConnectionInfoJSON() {
   result += String(quality);
   result += "%\"";
   return String("{")+result+String("}");
-}
-
-void handlePing() {
-  static unsigned long lastPingTime = 0;
-  if (millis() - lastPingTime > 1000) {
-    lastPingTime = millis();
-    if (Ping.ping(WiFi.gatewayIP())) {
-      Serial.println("Ping "+String(Ping.averageTime())+" "+getConnectionInfo());
-    } else {
-      //
-    }
-  }
 }
 
 void makeHTTPRequest(String URL) {
