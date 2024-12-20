@@ -1,5 +1,5 @@
 # Udo's Arduino Shenanigans 2025+
-## ESP 8266 Wifi-enabled Switch Monitor
+## wifi-switch1.ino
 
 Implements an HTTP-accessible system for monitoring the state of GPIO pins on an ESP8266. It supports OTA firmware updates, EEPROM-based configuration storage, and HTTP notifications.
 
@@ -108,17 +108,3 @@ const int safePins[] = {0, 2, 4, 5, 12, 13, 14};
 #### Notification Server
 
 Set a default notification server URL in the code or through the `/notify` endpoint.
-
-### Troubleshooting
-
-- **Device does not connect to Wi-Fi**:
-  - Ensure the stored credentials are correct.
-  - Reset the device and re-enter credentials using the captive portal.
-
-- **OTA Updates Fail**:
-  - Verify that the device and the computer are on the same network.
-  - Ensure no firewall is blocking the OTA process.
-
-- **No mDNS Resolution**:
-  - Install an mDNS resolver on your computer (e.g., `avahi-daemon` on Linux).
-
