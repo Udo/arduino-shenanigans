@@ -17,11 +17,12 @@
  * - `/reset`: Reboot the device.
  * 
  */
-
+ 
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
+#include <ESPping.h>
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
 
@@ -33,8 +34,6 @@ const char *passwordAP = "ESP12345";
 String hostName; // Device hostname
 int requestCounter = 0; // Total number of requests handled
 double avgLoopTime = 0; // Average loop execution time
-unsigned long switchTime[32]; // Last state change timestamps for GPIOs
-int switchState[32]; // Current GPIO states
 
 // DNS and Web server
 const byte DNS_PORT = 53;
@@ -47,10 +46,15 @@ WiFiClient client;
 String notifyServer = ""; // Notification server URL
 String httpRequestURLWaiting = ""; // Pending HTTP request URL
 
-// GPIO configuration
+// GPIO configuration and state
 const int EEPROM_SIZE = 512; // Size of EEPROM for storage
 int safePins[] = {0, 2, 4, 5, 12, 13, 14}; // Safe GPIO pins for monitoring
 int numPins = sizeof(safePins) / sizeof(safePins[0]);
+unsigned long switchTime[32]; // Last state change timestamps for GPIOs
+int switchState[32]; // Current GPIO states
+String eventLog[32];
+int eventLogIndex = 0;
+
 void writeStringToEEPROM(int address, String str) {
   for (int i = 0; i < str.length(); i++) {
     EEPROM.write(address + i, str[i]);
@@ -82,13 +86,77 @@ void loadNotifyServer() {
   Serial.println("Loaded Notify Server: " + notifyServer);
 }
 
+void makeHTTPRequest(String URL) {
+  if (httpRequestInProgress) {
+    httpRequestURLWaiting = URL;
+    return;
+  }
+
+  httpRequestURLWaiting = "";
+
+  String serverPart = URL;
+  String pathPart = "/";
+
+  int protocolSeparator = URL.indexOf("://");
+  if (protocolSeparator != -1) {
+    serverPart = URL.substring(protocolSeparator + 3);
+  }
+
+  int pathSeparator = serverPart.indexOf("/");
+  if (pathSeparator != -1) {
+    pathPart = serverPart.substring(pathSeparator);
+    serverPart = serverPart.substring(0, pathSeparator);
+  }
+
+  if (client.connect(serverPart.c_str(), 80)) {
+    Serial.println("Connected to server");
+    client.println("GET " + pathPart + " HTTP/1.1");
+    client.println("Host: " + serverPart);
+    client.println("Connection: close");
+    client.println();
+    httpRequestInProgress = true;
+  } else {
+    Serial.println("Failed to connect to server");
+  }
+}
+
+void handleHTTPOut() {
+  if (httpRequestInProgress) {
+    while (client.available()) {
+      String line = client.readStringUntil('\n');
+      Serial.println(line);
+    }
+    if (!client.connected()) {
+      Serial.println("Server disconnected");
+      client.stop();
+      httpRequestInProgress = false;
+      if(httpRequestURLWaiting != "") {
+        makeHTTPRequest(httpRequestURLWaiting);
+      }
+    }
+  }
+}
+
 void updateGPIO() {
+  bool updated = false;
+  String states = "";
   for (int i = 0; i < numPins; i++) {
     int pin = safePins[i];
     int state = digitalRead(pin);
     if(switchState[i] != state) {
+      eventLog[eventLogIndex] = "GPIO"+String(pin)+" "+String((state == 1 ? "OPEN" : "CLOSED"))+
+        " AFTER t=" + String(0.001*(millis()-switchTime[i])) +
+        " AT t=" + String(0.001*millis());
+      eventLogIndex++;
+      if(eventLogIndex >= 31) eventLogIndex = 0;
       switchState[i] = state;
       switchTime[i] = millis();
+      states += "GPIO"+String(pin)+"="+String((state == 1 ? "OPEN" : "CLOSED"))+"&";
+    }
+  }
+  if(updated) {
+    if (!notifyServer.isEmpty()) {
+      makeHTTPRequest(notifyServer+"?"+states);
     }
   }
 }
@@ -202,53 +270,14 @@ String getConnectionInfoJSON() {
   return String("{")+result+String("}");
 }
 
-void makeHTTPRequest(String URL) {
-  if (httpRequestInProgress) {
-    httpRequestURLWaiting = URL;
-    return;
-  }
-
-  httpRequestURLWaiting = "";
-
-  String serverPart = URL;
-  String pathPart = "/";
-
-  int protocolSeparator = URL.indexOf("://");
-  if (protocolSeparator != -1) {
-    serverPart = URL.substring(protocolSeparator + 3);
-  }
-
-  int pathSeparator = serverPart.indexOf("/");
-  if (pathSeparator != -1) {
-    pathPart = serverPart.substring(pathSeparator);
-    serverPart = serverPart.substring(0, pathSeparator);
-  }
-
-  if (client.connect(serverPart.c_str(), 80)) {
-    Serial.println("Connected to server");
-    client.println("GET " + pathPart + " HTTP/1.1");
-    client.println("Host: " + serverPart);
-    client.println("Connection: close");
-    client.println();
-    httpRequestInProgress = true;
-  } else {
-    Serial.println("Failed to connect to server");
-  }
-}
-
-void handleHTTPOut() {
-  if (httpRequestInProgress) {
-    while (client.available()) {
-      String line = client.readStringUntil('\n');
-      Serial.println(line);
-    }
-    if (!client.connected()) {
-      Serial.println("Server disconnected");
-      client.stop();
-      httpRequestInProgress = false;
-      if(httpRequestURLWaiting != "") {
-        makeHTTPRequest(httpRequestURLWaiting);
-      }
+void handlePing() {
+  static unsigned long lastPingTime = 0;
+  if (millis() - lastPingTime > 1000) {
+    lastPingTime = millis();
+    if (Ping.ping(WiFi.gatewayIP())) {
+      Serial.println("Ping "+String(Ping.averageTime())+" "+getConnectionInfo());
+    } else {
+      //
     }
   }
 }
@@ -268,8 +297,12 @@ void startServer() {
     String gpioStates = getGPIOStates();
     String gpioTimes = getGPIOTimes();
     String conInfo = getConnectionInfo();
-    server.send(200, "text/plain", String("NODE:\tHOST: ")+String(hostName)+"\tRC: "+String(requestCounter)+"\tLoad: "+String(avgLoopTime)+"\tUptime: "+String(millis()/1000)+"s\n"+
-      "SWITCHES:\t"+gpioStates+"\n"+
+    server.send(200, "text/plain", String("NODE:\tHOST: ")+String(hostName)+
+      "\tRC: "+String(requestCounter)+
+      "\tLoad: "+String(avgLoopTime)+
+      "\tUptime: "+String(millis()/1000)+"s"+
+      "\tHeap: "+String(ESP.getFreeHeap())+
+      "\nSWITCHES:\t"+gpioStates+"\n"+
       "SINCE:\t"+gpioTimes+"\n"+
       "CONNECTION:\t"+conInfo+"\n"+
       "COMMANDS: /, /reset, /json, /notify [URL]\n");
@@ -282,6 +315,19 @@ void startServer() {
     } else {
       server.send(200, "text/plain", "Notify: "+notifyServer+"\n");
     }
+  });
+  server.on("/history", HTTP_GET, []() {
+    String history = "";
+    
+    int start = eventLogIndex;
+    for (int i = 0; i < 31; i++) {
+        int index = (start + i) % 31; // Calculate the correct index in the ring buffer
+        if (!eventLog[index].isEmpty()) { // Only include non-empty entries
+            history += "[" + String(index) + "] " + eventLog[index] + "\n";
+        }
+    }
+
+    server.send(200, "text/plain", history);
   });
   server.on("/json", HTTP_GET, []() {
     requestCounter++;
@@ -380,7 +426,7 @@ void startOTA() {
 
 void setup() {
   setupGPIO();
-  hostName = String("ESP-MT-")+String(ESP.getChipId());
+  hostName = String("ESP-")+String(ESP.getChipId());
   Serial.begin(9600);
   EEPROM.begin(EEPROM_SIZE);
   
